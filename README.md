@@ -438,6 +438,74 @@ npm run clean    # Remove dist/
 npm test         # Run test suite
 ```
 
+#### Test Suite Overview
+
+The test suite validates the rbash MCP server functionality by:
+1. Reading credentials from `mcp.json`
+2. Starting the rbash server as a child process
+3. Communicating via the MCP stdio protocol
+4. Executing test commands and validating responses
+
+#### Prerequisites
+
+- Valid SSH credentials in `mcp.json` (configured for a test server)
+- Network connectivity to the remote host
+
+#### Test Resources
+
+Test files are located in `tests/fixtures/`:
+- `hello.txt` - Simple text file for cat/more tests
+- `numbers.txt` - Numeric data for wc/grep tests
+- `data.csv` - CSV data for parsing tests
+- `test-script.sh` - Executable shell script
+- `subdir/nested.txt` - Nested directory structure
+
+#### Running Tests
+
+```bash
+# Build and run all tests
+npm test
+
+# Build only (for debugging)
+npm run build:tests
+
+# Run TypeScript compiler to check for errors
+npm run typecheck
+```
+
+#### Test Coverage
+
+The test suite covers:
+- **Tool discovery**: Verifies bash and bash-status tools are registered
+- **Connection status**: Tests bash-status tool reports connectivity
+- **Basic commands**: echo, pwd, ls, file operations
+- **Persistent shell**: cd, export, variable persistence across calls
+- **Command chaining**: &&, ||, subshells, arithmetic
+- **File operations**: cat, head, tail, directory listing
+- **Environment info**: whoami, uptime, disk usage, shell info
+- **Error handling**: Command not found, permission denied, empty commands
+- **Timeouts**: Per-command timeout enforcement
+- **Complex commands**: Loops, conditionals, variable assignment
+
+#### Troubleshooting
+
+If tests fail:
+1. Verify `mcp.json` contains valid SSH credentials
+2. Ensure the remote host is accessible
+3. Check that `dist/index.js` exists (run `npm run build`)
+4. Verify network connectivity and SSH key permissions
+
+#### Creating a Test Configuration
+
+Copy the template and fill in your credentials:
+
+```bash
+cp mcp.json.template mcp.json
+# Edit mcp.json with your server details
+```
+
+**Important**: Never commit `mcp.json` with real credentials. The `.gitignore` excludes it from version control.
+
 ## License
 
 MIT

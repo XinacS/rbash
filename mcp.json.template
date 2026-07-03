@@ -1,0 +1,14 @@
+{
+    "mcpServers": {
+        "rbash": {
+            "command": "/path/to/rbash/dist/index.js",
+            "args": [
+                "--host", "YOUR_HOST",
+                "--user", "YOUR_USER",
+                "--key", "/path/to/your/ssh/key",
+                "--passphrase", "YOUR_PASSPHRASE",
+                "--cwd", "/your/working/directory"
+            ]
+        }
+    }
+}

@@ -24,7 +24,7 @@ export interface StatusInfo {
   connected: boolean;
 }
 
-const PROMPT = 'rbash-prompt-$$';
+const PROMPT = 'rbash-prompt-XYZ';
 
 function buildConnectionConfig(config: ServerConfig): Record<string, unknown> {
   const base: Record<string, unknown> = {
@@ -139,14 +139,28 @@ export function createSshSession(config: ServerConfig): SshSession {
 
             // Wait for cd to complete before resolving
             let cdDone = false;
+            let cdTimeout: ReturnType<typeof setTimeout>;
+            
             const onData = (data: Buffer) => {
-              if (!cdDone && data.toString('utf-8').includes(config.cwd)) {
+              const text = data.toString('utf-8');
+              // Check if we got any output (from pwd or cd failure)
+              if (!cdDone && text.trim().length > 0) {
                 cdDone = true;
+                clearTimeout(cdTimeout);
                 stream.removeListener('data', onData);
                 resolve(stream);
               }
             };
             stream.on('data', onData);
+            
+            // Timeout after 10 seconds if cd doesn't complete
+            cdTimeout = setTimeout(() => {
+              if (!cdDone) {
+                cdDone = true;
+                stream.removeListener('data', onData);
+                reject(new Error('SSH shell initialization timed out'));
+              }
+            }, 10000);
           },
         );
       });
@@ -191,26 +205,47 @@ export function createSshSession(config: ServerConfig): SshSession {
 
         const onData = (data: Buffer) => {
           const text = data.toString('utf-8');
+          console.error('[EXEC] Received data:', text.substring(0, 200));
 
           // Split into lines and filter
           const lines = text.split('\n');
           for (const line of lines) {
-            // Skip empty lines and our prompt marker
+            // Skip empty lines
+            if (line.trim() === '') continue;
+
+            // Extract exit code from "EXIT_CODE=NN"
+            const exitMatch = line.match(/EXIT_CODE=(\S+)/);
+            if (exitMatch) {
+              exitCode = parseInt(exitMatch[1], 10);
+              if (isNaN(exitCode)) exitCode = null;
+              continue;
+            }
+
+            // Extract signal from "EXIT_SIGNAL=SIGINT"
+            const signalMatch = line.match(/EXIT_SIGNAL=(\S+)/);
+            if (signalMatch) {
+              exitSignal = signalMatch[1];
+              continue;
+            }
+
+            // Check for prompt marker
             if (line.includes(PROMPT)) {
-              // Extract exit code from "EXIT_CODE=NN"
-              const exitMatch = line.match(/EXIT_CODE=(\S+)/);
-              if (exitMatch) {
-                exitCode = parseInt(exitMatch[1], 10);
-                if (isNaN(exitCode)) exitCode = null;
-              }
-              // Extract signal from "EXIT_SIGNAL=SIGINT"
-              const signalMatch = line.match(/EXIT_SIGNAL=(\S+)/);
-              if (signalMatch) {
-                exitSignal = signalMatch[1];
+              // Command is complete, resolve the promise
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolvePromise({
+                  stdout,
+                  stderr,
+                  exitCode,
+                  signal: exitSignal,
+                  duration: Date.now() - startTime,
+                  timedOut,
+                  truncated: false,
+                });
               }
               continue;
             }
-            if (line.trim() === '') continue;
 
             // Everything else is output (stdout or stderr mixed)
             stdout += line + '\n';
@@ -263,6 +298,17 @@ export function createSshSession(config: ServerConfig): SshSession {
         // Send the command
         shell.write(wrappedCommand + '\n');
       });
+    }).catch((err) => {
+      // Handle errors from ensureSession
+      return {
+        stdout: '',
+        stderr: err instanceof Error ? err.message : String(err),
+        exitCode: null,
+        signal: null,
+        duration: Date.now() - startTime,
+        timedOut: false,
+        truncated: false,
+      };
     });
   }
 
