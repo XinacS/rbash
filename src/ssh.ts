@@ -132,12 +132,21 @@ export function createSshSession(config: ServerConfig): SshSession {
             shell = stream;
             shellReady = true;
 
-            // Set shell and disable prompt
+            // Set shell, disable prompt, and change to starting directory
             stream.write(`export SHELL=${config.shell}\n`);
             stream.write(`export PS1=""\n`);
+            stream.write(`cd ${config.cwd} && pwd\n`);
 
-            // Small delay to let shell initialize
-            setTimeout(() => resolve(stream), 100);
+            // Wait for cd to complete before resolving
+            let cdDone = false;
+            const onData = (data: Buffer) => {
+              if (!cdDone && data.toString('utf-8').includes(config.cwd)) {
+                cdDone = true;
+                stream.removeListener('data', onData);
+                resolve(stream);
+              }
+            };
+            stream.on('data', onData);
           },
         );
       });
