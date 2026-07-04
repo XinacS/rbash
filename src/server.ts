@@ -2,44 +2,50 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod/v4';
 import type { ServerConfig } from './types.js';
-import { createSshSession, type SshSession } from './ssh.js';
+import { createSshSession } from './ssh.js';
 import { isCommandAllowed } from './filter.js';
 import { truncateOutput } from './utils.js';
 
-/**
- * Sudo tool: executes a command with sudo on the remote host.
- *
- * Design: commands are run non-interactively (stdin from /dev/null).
- * If sudo requires a password, it will receive EOF and fail immediately
- * rather than hanging waiting for user input. This prevents the common
- * timeout scenario where sudo prompts for a password and the connection
- * appears to hang.
- */
-function createSudoTool(config: ServerConfig, getSession: () => SshSession) {
-  return {
-    name: 'sudo',
-    description:
-      'Execute a command with sudo on the remote host. Runs non-interactively — if sudo requires a password, it will fail immediately rather than hanging. Use this for commands that need elevated privileges.',
-    inputSchema: z.object({
-      command: z
-        .string()
-        .describe('The shell command to execute with sudo on the remote host'),
-      timeout: z
-        .number()
-        .optional()
-        .describe(
-          'Per-command timeout in milliseconds (0 uses server default)',
-        ),
-      cwd: z
-        .string()
-        .optional()
-        .describe('Working directory on the remote host for this command'),
-    }),
-    handler: async (args: {
-      command: string;
-      timeout?: number;
-      cwd?: string;
-    }) => {
+const DEFAULT_CWD = '~';
+
+const BASH_DESCRIPTION = `Execute a shell command on the remote host via SSH.
+
+IMPORTANT: Each call is STATELESS — a fresh SSH connection is opened and closed per command. Environment variables, exports, cd, aliases, etc. do NOT persist between calls. The default working directory is ${DEFAULT_CWD}. Use the 'cwd' parameter to run a command in a different directory, or include 'cd /path && command' in the command string.`;
+
+export async function startServer(config: ServerConfig): Promise<void> {
+  const server = new McpServer({
+    name: 'rbash',
+    version: '0.1.0',
+  });
+
+  // Create a session factory — each call gets its own session
+  function makeSession() {
+    return createSshSession(config);
+  }
+
+  server.registerTool(
+    'bash',
+    {
+      description: BASH_DESCRIPTION,
+      inputSchema: z.object({
+        command: z
+          .string()
+          .describe('The shell command to execute on the remote host'),
+        timeout: z
+          .number()
+          .optional()
+          .describe(
+            'Per-command timeout in milliseconds (0 uses server default)',
+          ),
+        cwd: z
+          .string()
+          .optional()
+          .describe(
+            `Working directory on the remote host for this command. Default is ${DEFAULT_CWD}. Since each call is stateless, set this explicitly if the command needs a specific directory.`,
+          ),
+      }),
+    },
+    async (args) => {
       const { command, timeout, cwd } = args;
 
       const filterResult = isCommandAllowed(command, config);
@@ -55,23 +61,100 @@ function createSudoTool(config: ServerConfig, getSession: () => SshSession) {
         };
       }
 
-      // Wrap the command with sudo -n (non-interactive, no password prompt)
+      try {
+        const sess = makeSession();
+        const result = await sess.exec(command, {
+          timeout: timeout ?? config.timeout,
+          cwd,
+        });
+
+        const combinedOutput = result.stdout + result.stderr;
+        const { text, truncated } = truncateOutput(
+          combinedOutput,
+          config.maxChars,
+        );
+
+        return {
+          content: [{ type: 'text', text }],
+          structuredContent: {
+            exitCode: result.exitCode,
+            stderr: result.stderr,
+            duration: result.duration,
+            timedOut: result.timedOut,
+            truncated: truncated || result.truncated,
+            signal: result.signal,
+          },
+          isError: false,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error executing command: ${message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    'sudo',
+    {
+      description:
+        'Execute a command with sudo on the remote host via SSH. STATELESS — each call opens a fresh SSH connection. Runs non-interactively — if sudo requires a password, it will fail immediately rather than hanging. Use this for commands that need elevated privileges.',
+      inputSchema: z.object({
+        command: z
+          .string()
+          .describe('The shell command to execute with sudo on the remote host'),
+        timeout: z
+          .number()
+          .optional()
+          .describe(
+            'Per-command timeout in milliseconds (0 uses server default)',
+          ),
+        cwd: z
+          .string()
+          .optional()
+          .describe(
+            `Working directory on the remote host for this command. Default is ${DEFAULT_CWD}.`,
+          ),
+      }),
+    },
+    async (args) => {
+      const { command, timeout, cwd } = args;
+
+      const filterResult = isCommandAllowed(command, config);
+      if (!filterResult.allowed) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Command denied: ${filterResult.reason}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
       const sudoCommand = `sudo -n ${command}`;
 
       try {
-        const sess = getSession();
+        const sess = makeSession();
         const result = await sess.exec(sudoCommand, {
           timeout: timeout ?? config.timeout,
           cwd,
         });
 
+        const combinedOutput = result.stdout + result.stderr;
         const { text, truncated } = truncateOutput(
-          result.stdout,
+          combinedOutput,
           config.maxChars,
         );
 
-        // If sudo failed because it can't run non-interactively (no password
-        // configured or sudoers requires tty), provide a helpful error
         if (result.exitCode !== null && result.exitCode !== 0) {
           const stderr = result.stderr || '';
           if (
@@ -125,109 +208,6 @@ function createSudoTool(config: ServerConfig, getSession: () => SshSession) {
         };
       }
     },
-  };
-}
-
-export async function startServer(config: ServerConfig): Promise<void> {
-  const server = new McpServer({
-    name: 'rbash',
-    version: '0.1.0',
-  });
-
-  let session: SshSession | null = null;
-
-  function getSession(): SshSession {
-    if (!session) {
-      session = createSshSession(config);
-    }
-    return session;
-  }
-
-  server.registerTool(
-    'bash',
-    {
-      description:
-        'Execute a shell command on the remote host via SSH. Commands run in a persistent shell session, so cd, export, and source persist across calls.',
-      inputSchema: z.object({
-        command: z
-          .string()
-          .describe('The shell command to execute on the remote host'),
-        timeout: z
-          .number()
-          .optional()
-          .describe(
-            'Per-command timeout in milliseconds (0 uses server default)',
-          ),
-        cwd: z
-          .string()
-          .optional()
-          .describe('Working directory on the remote host for this command'),
-      }),
-    },
-    async (args) => {
-      const { command, timeout, cwd } = args;
-
-      const filterResult = isCommandAllowed(command, config);
-      if (!filterResult.allowed) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Command denied: ${filterResult.reason}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      try {
-        const sess = getSession();
-        const result = await sess.exec(command, {
-          timeout: timeout ?? config.timeout,
-          cwd,
-        });
-
-        const { text, truncated } = truncateOutput(
-          result.stdout,
-          config.maxChars,
-        );
-
-        return {
-          content: [{ type: 'text', text }],
-          structuredContent: {
-            exitCode: result.exitCode,
-            stderr: result.stderr,
-            duration: result.duration,
-            timedOut: result.timedOut,
-            truncated: truncated || result.truncated,
-            signal: result.signal,
-          },
-          isError: false,
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error executing command: ${message}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  // Register sudo tool
-  const sudoTool = createSudoTool(config, getSession);
-  server.registerTool(
-    sudoTool.name,
-    {
-      description: sudoTool.description,
-      inputSchema: sudoTool.inputSchema,
-    },
-    sudoTool.handler,
   );
 
   server.registerTool(
@@ -241,7 +221,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
     },
     async () => {
       try {
-        const sess = getSession();
+        const sess = makeSession();
         const info = await sess.status();
         const text = [
           `Connected to ${info.host}:${info.port} as ${info.username}`,
@@ -281,9 +261,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
   );
 
   const cleanup = () => {
-    if (session) {
-      session.destroy();
-    }
     process.exit(0);
   };
   process.on('SIGINT', cleanup);
