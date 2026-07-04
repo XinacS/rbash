@@ -78,6 +78,12 @@ export function createSshSession(config: ServerConfig): SshSession {
     }
   }
 
+  function markFatalError(): void {
+    console.error('[rbash] Fatal error, forcing full reconnect');
+    resetState();
+    consecutiveErrors = 0;
+  }
+
   function markSuccess(): void {
     consecutiveErrors = 0;
     resetIdleTimer();
@@ -135,12 +141,12 @@ export function createSshSession(config: ServerConfig): SshSession {
       conn = new Client();
 
       const onError = (err: Error) => {
-        markError();
+        markFatalError();
         reject(new Error(`SSH connection error: ${err.message}`));
       };
 
       const onClose = () => {
-        markError();
+        markFatalError();
         if (pendingError) {
           reject(pendingError);
         } else {
@@ -162,7 +168,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           (err, stream) => {
             if (err) {
               conn!.end();
-              markError();
+              markFatalError();
               reject(new Error(`SSH shell error: ${err.message}`));
               return;
             }
@@ -220,7 +226,9 @@ export function createSshSession(config: ServerConfig): SshSession {
     let timedOut = false;
     let settled = false;
 
-    return ensureSession().then((shell) => {
+    async function runOnce(): Promise<ExecResult> {
+      const shell = await ensureSession();
+
       return new Promise<ExecResult>((resolvePromise, rejectPromise) => {
         const timer = setTimeout(() => {
           timedOut = true;
@@ -230,7 +238,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           // Wait for the command to respond to Ctrl+C
           setTimeout(() => {
             settled = true;
-            markError();
+            markFatalError();
             // Reset the shell state to clear any pending data/ANSI codes
             // so the next command doesn't hang waiting for the PROMPT
             // from this timed-out command.
@@ -309,7 +317,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           clearTimeout(timer);
           if (!settled) {
             settled = true;
-            markError();
+            markFatalError();
             resetState();
             resolvePromise({
               stdout,
@@ -328,7 +336,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           if (!settled) {
             settled = true;
             pendingError = err;
-            markError();
+            markFatalError();
             rejectPromise(new Error(`SSH shell error: ${err.message}`));
           }
         };
@@ -347,8 +355,16 @@ export function createSshSession(config: ServerConfig): SshSession {
         // Send the command
         shell.write(wrappedCommand + '\n');
       });
-    }).catch((err) => {
-      // Handle errors from ensureSession
+    }
+
+    return runOnce().catch(async (err) => {
+      // If the connection was dead, try reconnecting once
+      if (isConnectionError(err)) {
+        console.error('[rbash] Connection lost, reconnecting...');
+        resetState();
+        consecutiveErrors = 0;
+        return runOnce();
+      }
       return {
         stdout: '',
         stderr: err instanceof Error ? err.message : String(err),
@@ -359,6 +375,19 @@ export function createSshSession(config: ServerConfig): SshSession {
         truncated: false,
       };
     });
+  }
+
+  function isConnectionError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return (
+      msg.includes('SSH connection error') ||
+      msg.includes('SSH connection closed') ||
+      msg.includes('SSH shell error') ||
+      msg.includes('Connection reset') ||
+      msg.includes('Broken pipe') ||
+      msg.includes('ECONNRESET') ||
+      msg.includes('socket hang up')
+    );
   }
 
   function status(): Promise<StatusInfo> {
