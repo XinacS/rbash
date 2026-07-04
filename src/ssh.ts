@@ -338,11 +338,11 @@ export function createSshSession(config: ServerConfig): SshSession {
         shell.on('error', onErr);
 
         // Build the command with exit code capture wrapper.
-        // Run the command in a subshell with stdin from /dev/null to prevent
-        // hanging on interactive prompts. The exit code capture is outside the
-        // subshell so it doesn't interfere with the command.
+        // The subshell is isolated so timeouts don't corrupt the persistent shell state.
+        // We don't redirect stdin to avoid breaking pipes and other shell features.
+        // If a command hangs, the timeout will kill it.
         const cwdPrefix = options.cwd ? `cd ${options.cwd} && ` : '';
-        const wrappedCommand = `(${cwdPrefix}${command} < /dev/null); echo "EXIT_CODE=$?"; echo "EXIT_SIGNAL=$!"; echo "${PROMPT}"`;
+        const wrappedCommand = `${cwdPrefix}${command}; echo "EXIT_CODE=$?"; echo "EXIT_SIGNAL=$!"; echo "${PROMPT}"`;
 
         // Send the command
         shell.write(wrappedCommand + '\n');

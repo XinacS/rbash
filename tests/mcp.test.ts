@@ -347,5 +347,25 @@ describe('rbash MCP server', () => {
         );
       }
     });
+
+    it('should handle complex commands with environment variables', async () => {
+      // Test a command similar to the psql command
+      const result = await client.callTool('bash', {
+        command: "PGPASSWORD='fake-test-password' env | grep PGPASSWORD",
+      });
+      assert.equal(result.isError, false);
+      const text = result.content[0]?.text || '';
+      assert.ok(text.includes('PGPASSWORD=fake-test-password'), 'should contain the env var');
+    });
+
+    it('should handle commands with special characters', async () => {
+      // Test a command with special characters like the psql command
+      const result = await client.callTool('bash', {
+        command: "PGPASSWORD='fake&special!chars' env | grep PGPASSWORD",
+      });
+      assert.equal(result.isError, false);
+      const text = result.content[0]?.text || '';
+      assert.ok(text.includes('PGPASSWORD=fake'), 'should contain the env var with special chars');
+    });
   });
 });
