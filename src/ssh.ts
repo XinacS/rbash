@@ -57,10 +57,44 @@ function buildConnectionConfig(config: ServerConfig): Record<string, unknown> {
 }
 
 export function createSshSession(config: ServerConfig): SshSession {
+  const maxConsecutiveErrors = config.maxConsecutiveErrors ?? 3;
+  const idleTimeoutMs = config.idleTimeout ?? 0;
+
   let conn: Client | null = null;
   let shell: ClientChannel | null = null;
   let shellReady = false;
   let pendingError: Error | null = null;
+  let consecutiveErrors = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function markError(): void {
+    consecutiveErrors++;
+    if (consecutiveErrors >= maxConsecutiveErrors) {
+      console.error(
+        `[rbash] ${consecutiveErrors} consecutive errors, forcing reconnect`,
+      );
+      resetState();
+      consecutiveErrors = 0;
+    }
+  }
+
+  function markSuccess(): void {
+    consecutiveErrors = 0;
+    resetIdleTimer();
+  }
+
+  function resetIdleTimer(): void {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (idleTimeoutMs > 0) {
+      idleTimer = setTimeout(() => {
+        console.error('[rbash] Idle timeout reached, closing connection');
+        resetState();
+      }, idleTimeoutMs);
+    }
+  }
 
   function resetState(): void {
     if (shell) {
@@ -87,6 +121,7 @@ export function createSshSession(config: ServerConfig): SshSession {
     }
     shellReady = false;
     pendingError = null;
+    resetIdleTimer();
   }
 
   function ensureSession(): Promise<ClientChannel> {
@@ -100,10 +135,12 @@ export function createSshSession(config: ServerConfig): SshSession {
       conn = new Client();
 
       const onError = (err: Error) => {
+        markError();
         reject(new Error(`SSH connection error: ${err.message}`));
       };
 
       const onClose = () => {
+        markError();
         if (pendingError) {
           reject(pendingError);
         } else {
@@ -125,6 +162,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           (err, stream) => {
             if (err) {
               conn!.end();
+              markError();
               reject(new Error(`SSH shell error: ${err.message}`));
               return;
             }
@@ -140,24 +178,24 @@ export function createSshSession(config: ServerConfig): SshSession {
             // Wait for cd to complete before resolving
             let cdDone = false;
             let cdTimeout: ReturnType<typeof setTimeout>;
-            
+
             const onData = (data: Buffer) => {
               const text = data.toString('utf-8');
-              // Check if we got any output (from pwd or cd failure)
               if (!cdDone && text.trim().length > 0) {
                 cdDone = true;
                 clearTimeout(cdTimeout);
                 stream.removeListener('data', onData);
+                markSuccess();
                 resolve(stream);
               }
             };
             stream.on('data', onData);
-            
-            // Timeout after 10 seconds if cd doesn't complete
+
             cdTimeout = setTimeout(() => {
               if (!cdDone) {
                 cdDone = true;
                 stream.removeListener('data', onData);
+                markError();
                 reject(new Error('SSH shell initialization timed out'));
               }
             }, 10000);
@@ -189,8 +227,14 @@ export function createSshSession(config: ServerConfig): SshSession {
           // Send Ctrl+C to interrupt the running command
           shell.write('\x03');
 
+          // Wait for the command to respond to Ctrl+C
           setTimeout(() => {
             settled = true;
+            markError();
+            // Reset the shell state to clear any pending data/ANSI codes
+            // so the next command doesn't hang waiting for the PROMPT
+            // from this timed-out command.
+            resetState();
             resolvePromise({
               stdout,
               stderr,
@@ -200,14 +244,15 @@ export function createSshSession(config: ServerConfig): SshSession {
               timedOut: true,
               truncated: false,
             });
-          }, 2000);
+          }, 1000);
         }, timeoutMs);
 
         const onData = (data: Buffer) => {
           const text = data.toString('utf-8');
-          console.error('[EXEC] Received data:', text.substring(0, 200));
+          console.error('[rbash] Received data:', JSON.stringify(text.substring(0, 500)));
 
           // Split into lines and filter
+          // Only split on \n to preserve \r in ANSI codes
           const lines = text.split('\n');
           for (const line of lines) {
             // Skip empty lines
@@ -234,6 +279,7 @@ export function createSshSession(config: ServerConfig): SshSession {
               if (!settled) {
                 settled = true;
                 clearTimeout(timer);
+                markSuccess();
                 resolvePromise({
                   stdout,
                   stderr,
@@ -256,6 +302,8 @@ export function createSshSession(config: ServerConfig): SshSession {
           clearTimeout(timer);
           if (!settled) {
             settled = true;
+            markError();
+            resetState();
             resolvePromise({
               stdout,
               stderr,
@@ -273,6 +321,7 @@ export function createSshSession(config: ServerConfig): SshSession {
           if (!settled) {
             settled = true;
             pendingError = err;
+            markError();
             rejectPromise(new Error(`SSH shell error: ${err.message}`));
           }
         };
@@ -282,13 +331,9 @@ export function createSshSession(config: ServerConfig): SshSession {
         shell.on('error', onErr);
 
         // Build the command with exit code capture wrapper
-        const wrappedCommand = [
-          `trap 'echo "EXIT_SIGNAL=$!"' INT TERM`,
-          command,
-          `echo "EXIT_CODE=$?"`,
-          `echo "EXIT_SIGNAL=$!"`,
-          `echo "${PROMPT}"`,
-        ].join(' && ');
+        // Redirect stdin from /dev/null to prevent hanging on input prompts
+        // Use ; to ensure EXIT_CODE/PROMPT always execute regardless of exit code
+        const wrappedCommand = `(trap 'echo "EXIT_SIGNAL=$!"' INT TERM; ${command} < /dev/null; echo "EXIT_CODE=$?"; echo "EXIT_SIGNAL=$!"; echo "${PROMPT}")`;
 
         // If stdin is provided, write it before the command
         if (options.stdin) {
@@ -328,6 +373,7 @@ export function createSshSession(config: ServerConfig): SshSession {
             clearTimeout(timer);
             shell.removeListener('data', onData);
             shell.removeListener('error', onErr);
+            markSuccess();
 
             // Parse hostname from output
             const lines = collected.split('\n').filter((l) => l.trim());
@@ -346,6 +392,7 @@ export function createSshSession(config: ServerConfig): SshSession {
 
         const onErr = (err: Error) => {
           clearTimeout(timer);
+          markError();
           reject(err);
         };
 

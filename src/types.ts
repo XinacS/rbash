@@ -28,6 +28,10 @@ export interface ServerConfig {
   whitelist: RegExp[];
   /** Command blacklist regexes */
   blacklist: RegExp[];
+  /** Max consecutive errors before forcing reconnect (default: 3) */
+  maxConsecutiveErrors?: number;
+  /** Idle timeout in ms — close connection if no commands for this duration (0 = disabled, default: 0) */
+  idleTimeout?: number;
 }
 
 /** Result of executing a command on the remote host */

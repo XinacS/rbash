@@ -123,6 +123,14 @@ export async function startServer(config: ServerConfig): Promise<void> {
         ].join('\n');
         return {
           content: [{ type: 'text', text }],
+          structuredContent: {
+            connected: true,
+            host: info.host,
+            port: info.port,
+            username: info.username,
+            hostname: info.hostname,
+            shell: info.shell,
+          },
           isError: false,
         };
       } catch (err) {
@@ -134,6 +142,10 @@ export async function startServer(config: ServerConfig): Promise<void> {
               text: `Connection failed: ${message}`,
             },
           ],
+          structuredContent: {
+            connected: false,
+            error: message,
+          },
           isError: true,
         };
       }

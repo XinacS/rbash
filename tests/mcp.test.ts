@@ -224,6 +224,21 @@ describe('rbash MCP server', () => {
       // Empty command may just return prompt, that's fine
       assert.ok(result.content.length > 0 || result.isError, 'should return a result');
     });
+
+    it('should handle non-zero exit codes without hanging', async () => {
+      const result = await client.callTool('bash', { command: 'false' });
+      assert.equal(result.isError, false, 'should not error');
+      assert.equal(result.structuredContent?.exitCode, 1, 'should capture exit code 1');
+      assert.equal(result.structuredContent?.timedOut, false, 'should not be marked as timed out');
+    });
+
+    it('should handle commands that fail mid-chain', async () => {
+      const result = await client.callTool('bash', { command: 'echo before && false && echo after' });
+      assert.equal(result.isError, false, 'should not error');
+      assert.equal(result.structuredContent?.exitCode, 1, 'should capture exit code 1');
+      const text = result.content[0]?.text || '';
+      assert.ok(text.includes('before'), 'should contain "before" output');
+    });
   });
 
   describe('bash - timeout', () => {

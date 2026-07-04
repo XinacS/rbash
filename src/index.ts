@@ -34,7 +34,17 @@ program
   .option('--blacklist <patterns>', 'Comma-separated regex deny list')
   .option('--cwd <dir>', 'Default working directory on remote', '~')
   .option('--shell <path>', 'Remote shell path', '/bin/bash')
-  .option('--term <type>', 'Terminal type', 'xterm-256color');
+  .option('--term <type>', 'Terminal type', 'xterm-256color')
+  .option(
+    '--maxConsecutiveErrors <n>',
+    'Max consecutive SSH errors before forcing reconnect',
+    '3',
+  )
+  .option(
+    '--idleTimeout <ms>',
+    'Close connection after idle period (0 = disabled)',
+    '0',
+  );
 
 program.parse(process.argv);
 
@@ -79,6 +89,8 @@ const serverConfig: ServerConfig = {
   term: opts.term,
   whitelist: opts.whitelist ? parsePatterns(opts.whitelist) : [],
   blacklist: opts.blacklist ? parsePatterns(opts.blacklist) : [],
+  maxConsecutiveErrors: parseInt(opts.maxConsecutiveErrors, 10),
+  idleTimeout: parseInt(opts.idleTimeout, 10),
 };
 
 startServer(serverConfig).catch((err) => {
