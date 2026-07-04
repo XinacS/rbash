@@ -6,6 +6,128 @@ import { createSshSession, type SshSession } from './ssh.js';
 import { isCommandAllowed } from './filter.js';
 import { truncateOutput } from './utils.js';
 
+/**
+ * Sudo tool: executes a command with sudo on the remote host.
+ *
+ * Design: commands are run non-interactively (stdin from /dev/null).
+ * If sudo requires a password, it will receive EOF and fail immediately
+ * rather than hanging waiting for user input. This prevents the common
+ * timeout scenario where sudo prompts for a password and the connection
+ * appears to hang.
+ */
+function createSudoTool(config: ServerConfig, getSession: () => SshSession) {
+  return {
+    name: 'sudo',
+    description:
+      'Execute a command with sudo on the remote host. Runs non-interactively — if sudo requires a password, it will fail immediately rather than hanging. Use this for commands that need elevated privileges.',
+    inputSchema: z.object({
+      command: z
+        .string()
+        .describe('The shell command to execute with sudo on the remote host'),
+      timeout: z
+        .number()
+        .optional()
+        .describe(
+          'Per-command timeout in milliseconds (0 uses server default)',
+        ),
+      cwd: z
+        .string()
+        .optional()
+        .describe('Working directory on the remote host for this command'),
+    }),
+    handler: async (args: {
+      command: string;
+      timeout?: number;
+      cwd?: string;
+    }) => {
+      const { command, timeout, cwd } = args;
+
+      const filterResult = isCommandAllowed(command, config);
+      if (!filterResult.allowed) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Command denied: ${filterResult.reason}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Wrap the command with sudo -n (non-interactive, no password prompt)
+      const sudoCommand = `sudo -n ${command}`;
+
+      try {
+        const sess = getSession();
+        const result = await sess.exec(sudoCommand, {
+          timeout: timeout ?? config.timeout,
+          cwd,
+        });
+
+        const { text, truncated } = truncateOutput(
+          result.stdout,
+          config.maxChars,
+        );
+
+        // If sudo failed because it can't run non-interactively (no password
+        // configured or sudoers requires tty), provide a helpful error
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          const stderr = result.stderr || '';
+          if (
+            stderr.includes('no tty present') ||
+            stderr.includes('a password is required') ||
+            stderr.includes('Sorry, try again')
+          ) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `sudo failed: ${stderr.trim() || `command exited with code ${result.exitCode}`}. The sudo configuration on the remote host does not allow passwordless sudo for this command. Configure sudoers to allow passwordless execution, or run the command without sudo.`,
+                },
+              ],
+              structuredContent: {
+                exitCode: result.exitCode,
+                stderr: result.stderr,
+                duration: result.duration,
+                timedOut: result.timedOut,
+                truncated: truncated || result.truncated,
+                signal: result.signal,
+                sudoRequiresPassword: true,
+              },
+              isError: true,
+            };
+          }
+        }
+
+        return {
+          content: [{ type: 'text', text }],
+          structuredContent: {
+            exitCode: result.exitCode,
+            stderr: result.stderr,
+            duration: result.duration,
+            timedOut: result.timedOut,
+            truncated: truncated || result.truncated,
+            signal: result.signal,
+          },
+          isError: false,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error executing sudo command: ${message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
 export async function startServer(config: ServerConfig): Promise<void> {
   const server = new McpServer({
     name: 'rbash',
@@ -30,10 +152,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
         command: z
           .string()
           .describe('The shell command to execute on the remote host'),
-        stdin: z
-          .string()
-          .optional()
-          .describe('Optional input to pipe to the command stdin'),
         timeout: z
           .number()
           .optional()
@@ -47,7 +165,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
       }),
     },
     async (args) => {
-      const { command, stdin, timeout, cwd } = args;
+      const { command, timeout, cwd } = args;
 
       const filterResult = isCommandAllowed(command, config);
       if (!filterResult.allowed) {
@@ -65,7 +183,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
       try {
         const sess = getSession();
         const result = await sess.exec(command, {
-          stdin,
           timeout: timeout ?? config.timeout,
           cwd,
         });
@@ -100,6 +217,17 @@ export async function startServer(config: ServerConfig): Promise<void> {
         };
       }
     },
+  );
+
+  // Register sudo tool
+  const sudoTool = createSudoTool(config, getSession);
+  server.registerTool(
+    sudoTool.name,
+    {
+      description: sudoTool.description,
+      inputSchema: sudoTool.inputSchema,
+    },
+    sudoTool.handler,
   );
 
   server.registerTool(

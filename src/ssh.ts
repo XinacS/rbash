@@ -10,7 +10,6 @@ export interface SshSession {
 }
 
 export interface ExecOptions {
-  stdin?: string;
   timeout?: number;
   cwd?: string;
 }
@@ -25,6 +24,7 @@ export interface StatusInfo {
 }
 
 const PROMPT = 'rbash-prompt-XYZ';
+const OUTPUT_DELIM = 'rbash-output-start-XYZ';
 
 function buildConnectionConfig(config: ServerConfig): Record<string, unknown> {
   const base: Record<string, unknown> = {
@@ -173,7 +173,7 @@ export function createSshSession(config: ServerConfig): SshSession {
             // Set shell, disable prompt, and change to starting directory
             stream.write(`export SHELL=${config.shell}\n`);
             stream.write(`export PS1=""\n`);
-            stream.write(`cd ${config.cwd} && pwd\n`);
+            stream.write(`cd ${config.cwd} && pwd && echo "${PROMPT}"\n`);
 
             // Wait for cd to complete before resolving
             let cdDone = false;
@@ -181,7 +181,7 @@ export function createSshSession(config: ServerConfig): SshSession {
 
             const onData = (data: Buffer) => {
               const text = data.toString('utf-8');
-              if (!cdDone && text.trim().length > 0) {
+              if (!cdDone && text.includes(PROMPT)) {
                 cdDone = true;
                 clearTimeout(cdTimeout);
                 stream.removeListener('data', onData);
@@ -249,7 +249,6 @@ export function createSshSession(config: ServerConfig): SshSession {
 
         const onData = (data: Buffer) => {
           const text = data.toString('utf-8');
-          console.error('[rbash] Received data:', JSON.stringify(text.substring(0, 500)));
 
           // Split into lines and filter
           // Only split on \n to preserve \r in ANSI codes
@@ -258,18 +257,26 @@ export function createSshSession(config: ServerConfig): SshSession {
             // Skip empty lines
             if (line.trim() === '') continue;
 
+            // Strip ANSI escape sequences for cleaner output parsing
+            const cleanLine = line.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+            if (cleanLine === '') continue;
+
             // Extract exit code from "EXIT_CODE=NN"
-            const exitMatch = line.match(/EXIT_CODE=(\S+)/);
+            const exitMatch = cleanLine.match(/EXIT_CODE=(\S*)/);
             if (exitMatch) {
-              exitCode = parseInt(exitMatch[1], 10);
-              if (isNaN(exitCode)) exitCode = null;
+              if (exitMatch[1] !== '') {
+                exitCode = parseInt(exitMatch[1], 10);
+                if (isNaN(exitCode)) exitCode = null;
+              }
               continue;
             }
 
-            // Extract signal from "EXIT_SIGNAL=SIGINT"
-            const signalMatch = line.match(/EXIT_SIGNAL=(\S+)/);
+            // Extract signal from "EXIT_SIGNAL=..." (skip empty signals)
+            const signalMatch = cleanLine.match(/EXIT_SIGNAL=(.*)/);
             if (signalMatch) {
-              exitSignal = signalMatch[1];
+              if (signalMatch[1].trim() !== '') {
+                exitSignal = signalMatch[1].trim();
+              }
               continue;
             }
 
@@ -294,7 +301,7 @@ export function createSshSession(config: ServerConfig): SshSession {
             }
 
             // Everything else is output (stdout or stderr mixed)
-            stdout += line + '\n';
+            stdout += cleanLine + '\n';
           }
         };
 
@@ -330,15 +337,14 @@ export function createSshSession(config: ServerConfig): SshSession {
         shell.on('close', onClose);
         shell.on('error', onErr);
 
-        // Build the command with exit code capture wrapper
-        // Redirect stdin from /dev/null to prevent hanging on input prompts
-        // Use ; to ensure EXIT_CODE/PROMPT always execute regardless of exit code
-        const wrappedCommand = `(trap 'echo "EXIT_SIGNAL=$!"' INT TERM; ${command} < /dev/null; echo "EXIT_CODE=$?"; echo "EXIT_SIGNAL=$!"; echo "${PROMPT}")`;
-
-        // If stdin is provided, write it before the command
-        if (options.stdin) {
-          shell.write(options.stdin);
-        }
+        // Build the command with exit code capture wrapper.
+        // Run in a subshell with stdin from /dev/null to prevent hanging on
+        // interactive prompts (e.g. sudo password). The subshell is isolated
+        // so timeouts don't corrupt the persistent shell state.
+        // Note: < /dev/null is applied to the subshell, not the command,
+        // so individual commands can still read from their normal stdin.
+        const cwdPrefix = options.cwd ? `cd ${options.cwd} && ` : '';
+        const wrappedCommand = `(trap 'echo "EXIT_SIGNAL=$!"' INT TERM; exec 0</dev/null; ${cwdPrefix}${command}; echo "EXIT_CODE=$?"; echo "EXIT_SIGNAL=$!"; echo "${PROMPT}")`;
 
         // Send the command
         shell.write(wrappedCommand + '\n');

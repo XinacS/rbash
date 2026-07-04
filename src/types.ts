@@ -56,8 +56,6 @@ export interface ExecResult {
 export interface BashToolInput {
   /** The shell command to execute */
   command: string;
-  /** Optional stdin to pipe to the command */
-  stdin?: string;
   /** Per-command timeout override in ms (0 = use default) */
   timeout?: number;
   /** Working directory for this command on remote */
