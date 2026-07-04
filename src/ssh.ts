@@ -24,6 +24,7 @@ export interface StatusInfo {
 }
 
 const PROMPT = 'rbash-prompt-XYZ';
+const HEALTH_CHECK_PROMPT = 'rbash-health-check-XYZ';
 const OUTPUT_DELIM = 'rbash-output-start-XYZ';
 
 function buildConnectionConfig(config: ServerConfig): Record<string, unknown> {
@@ -132,7 +133,48 @@ export function createSshSession(config: ServerConfig): SshSession {
 
   function ensureSession(): Promise<ClientChannel> {
     if (conn && shell && shellReady) {
-      return Promise.resolve(shell);
+      // Health check: verify the shell is still alive before returning it
+      return new Promise<ClientChannel>((resolve, reject) => {
+        const healthCheckTimer = setTimeout(() => {
+          console.error('[rbash] Health check timed out, reconnecting');
+          resetState();
+          ensureSession().then(resolve, reject);
+        }, 3000);
+
+        let healthDone = false;
+        const healthData = (data: Buffer) => {
+          const text = data.toString('utf-8');
+          if (text.includes(HEALTH_CHECK_PROMPT)) {
+            if (!healthDone) {
+              healthDone = true;
+              clearTimeout(healthCheckTimer);
+              shell!.removeListener('data', healthData);
+              resolve(shell!);
+            }
+          }
+        };
+
+        shell!.on('data', healthData);
+        shell!.on('error', () => {
+          if (!healthDone) {
+            healthDone = true;
+            clearTimeout(healthCheckTimer);
+            resetState();
+            ensureSession().then(resolve, reject);
+          }
+        });
+        shell!.on('close', () => {
+          if (!healthDone) {
+            healthDone = true;
+            clearTimeout(healthCheckTimer);
+            resetState();
+            ensureSession().then(resolve, reject);
+          }
+        });
+
+        // Send a no-op command to verify the connection is alive
+        shell!.write(`echo "${HEALTH_CHECK_PROMPT}"\n`);
+      });
     }
 
     resetState();
