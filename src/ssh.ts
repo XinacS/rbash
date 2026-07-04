@@ -138,7 +138,8 @@ export function createSshSession(config: ServerConfig): SshSession {
         const healthCheckTimer = setTimeout(() => {
           console.error('[rbash] Health check timed out, reconnecting');
           resetState();
-          ensureSession().then(resolve, reject);
+          // Don't recursively call ensureSession - just reject and let the caller retry
+          reject(new Error('Health check timed out'));
         }, 3000);
 
         let healthDone = false;
@@ -160,7 +161,7 @@ export function createSshSession(config: ServerConfig): SshSession {
             healthDone = true;
             clearTimeout(healthCheckTimer);
             resetState();
-            ensureSession().then(resolve, reject);
+            reject(new Error('Health check failed: shell error'));
           }
         });
         shell!.on('close', () => {
@@ -168,7 +169,7 @@ export function createSshSession(config: ServerConfig): SshSession {
             healthDone = true;
             clearTimeout(healthCheckTimer);
             resetState();
-            ensureSession().then(resolve, reject);
+            reject(new Error('Health check failed: shell closed'));
           }
         });
 

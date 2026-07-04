@@ -240,6 +240,26 @@ describe('rbash MCP server', () => {
       });
       assert.ok(result.structuredContent?.timedOut === true, 'should report timedOut=true');
     });
+
+    it('should recover from stdin timeout and allow subsequent commands', async () => {
+      // Command that asks for stdin input (will timeout)
+      const stdinResult = await client.callTool('bash', {
+        command: 'read -p "Enter something: " input',
+        timeout: 2000,
+      });
+      assert.ok(stdinResult.structuredContent?.timedOut === true, 'stdin command should timeout');
+      
+      // Give the connection a moment to recover
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Subsequent command should succeed
+      const followUpResult = await client.callTool('bash', {
+        command: 'echo "recovery successful"',
+      });
+      assert.equal(followUpResult.isError, false, `follow-up command should not error: ${followUpResult.content[0]?.text}`);
+      const text = followUpResult.content[0]?.text || '';
+      assert.ok(text.includes('recovery successful'), `should contain "recovery successful", got: ${text}`);
+    });
   });
 
   describe('bash - complex commands', () => {
