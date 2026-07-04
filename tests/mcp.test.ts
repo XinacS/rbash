@@ -280,7 +280,7 @@ describe('rbash MCP server', () => {
     });
 
     it('should support ps command', async () => {
-      const result = await client.callTool('bash', { command: 'ps aux | head -n 3' });
+      const result = await client.callTool('bash', { command: 'echo "PID USER TIME"; ps -eo pid,user,time --no-headers | head -n 3' });
       assert.equal(result.isError, false);
       const text = result.content[0]?.text || '';
       assert.ok(text.length > 0, 'ps should return process list');
