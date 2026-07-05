@@ -19,7 +19,24 @@ export function parsePatterns(patterns: string): RegExp[] {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
-    .map((s) => new RegExp(s));
+    .map((s) => {
+      let flags = '';
+      let body = s;
+      // Handle inline flags like (?i), (?im), (?i)ALTER ROLE
+      const flagMatch = body.match(/^\(\?([imxs]+)\)/);
+      if (flagMatch) {
+        flags = flagMatch[1];
+        body = body.slice(flagMatch[0].length);
+      }
+      try {
+        return new RegExp(body, flags);
+      } catch (e) {
+        throw new Error(
+          `Invalid regex pattern "${s}": ${(e as Error).message}. ` +
+          'Check for unbalanced parentheses, invalid character classes, or other regex syntax errors.',
+        );
+      }
+    });
 }
 
 /** Truncate a string to maxChars, appending a notice */
