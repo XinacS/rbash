@@ -8,9 +8,9 @@ import { truncateOutput } from './utils.js';
 
 const DEFAULT_CWD = '~';
 
-const BASH_DESCRIPTION = `Execute a shell command on the remote host via SSH.
+const BASH_DESCRIPTION = `Execute a shell command on the remote server via SSH.
 
-IMPORTANT: Each call is STATELESS — a fresh SSH connection is opened and closed per command. Environment variables, exports, cd, aliases, etc. do NOT persist between calls. The default working directory is ${DEFAULT_CWD}. Use the 'cwd' parameter to run a command in a different directory, or include 'cd /path && command' in the command string.`;
+IMPORTANT: This runs commands on the REMOTE SERVER, NOT locally. Each call is STATELESS — a fresh SSH connection is opened and closed per command. Environment variables, exports, cd, aliases, etc. do NOT persist between calls. The default working directory is ${DEFAULT_CWD}. Use the 'cwd' parameter to run a command in a different directory, or include 'cd /path && command' in the command string.`;
 
 export async function startServer(config: ServerConfig): Promise<void> {
   const server = new McpServer({
@@ -24,13 +24,13 @@ export async function startServer(config: ServerConfig): Promise<void> {
   }
 
   server.registerTool(
-    'bash',
+    'remote-bash',
     {
       description: BASH_DESCRIPTION,
       inputSchema: z.object({
         command: z
           .string()
-          .describe('The shell command to execute on the remote host'),
+          .describe('The shell command to execute on the remote server via SSH'),
         timeout: z
           .number()
           .optional()
@@ -41,7 +41,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
           .string()
           .optional()
           .describe(
-            `Working directory on the remote host for this command. Default is ${DEFAULT_CWD}. Since each call is stateless, set this explicitly if the command needs a specific directory.`,
+            `Working directory on the remote server for this command. Default is ${DEFAULT_CWD}. Since each call is stateless, set this explicitly if the command needs a specific directory.`,
           ),
       }),
     },
@@ -102,14 +102,14 @@ export async function startServer(config: ServerConfig): Promise<void> {
   );
 
   server.registerTool(
-    'sudo',
+    'remote-sudo',
     {
       description:
-        'Execute a command with sudo on the remote host via SSH. STATELESS — each call opens a fresh SSH connection. Runs non-interactively — if sudo requires a password, it will fail immediately rather than hanging. Use this for commands that need elevated privileges.',
+        'Execute a command with sudo on the remote server via SSH. STATELESS — each call opens a fresh SSH connection. Runs non-interactively — if sudo requires a password, it will fail immediately rather than hanging. Use this for commands that need elevated privileges on the remote server.',
       inputSchema: z.object({
         command: z
           .string()
-          .describe('The shell command to execute with sudo on the remote host'),
+          .describe('The shell command to execute with sudo on the remote server via SSH'),
         timeout: z
           .number()
           .optional()
@@ -120,7 +120,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
           .string()
           .optional()
           .describe(
-            `Working directory on the remote host for this command. Default is ${DEFAULT_CWD}.`,
+            `Working directory on the remote server for this command. Default is ${DEFAULT_CWD}.`,
           ),
       }),
     },
@@ -211,10 +211,10 @@ export async function startServer(config: ServerConfig): Promise<void> {
   );
 
   server.registerTool(
-    'bash-status',
+    'remote-bash-status',
     {
       description:
-        'Test the SSH connection and return remote host information.',
+        'Test the SSH connection to the remote server and return remote host information.',
       inputSchema: z
         .object({})
         .describe('No parameters required'),
