@@ -65,7 +65,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
         const sess = makeSession();
         const result = await sess.exec(command, {
           timeout: timeout ?? config.timeout,
-          cwd,
+          cwd: cwd ?? config.cwd,
         });
 
         const combinedOutput = result.stdout + result.stderr;
@@ -146,7 +146,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
         const sess = makeSession();
         const result = await sess.exec(sudoCommand, {
           timeout: timeout ?? config.timeout,
-          cwd,
+          cwd: cwd ?? config.cwd,
         });
 
         const combinedOutput = result.stdout + result.stderr;
