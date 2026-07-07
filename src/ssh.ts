@@ -1,4 +1,4 @@
-import { Client, type ClientChannel } from 'ssh2';
+import { Client } from 'ssh2';
 import type { ServerConfig, ExecResult } from './types.js';
 import { expandPath } from './utils.js';
 import { readFileSync } from 'node:fs';
@@ -127,11 +127,11 @@ export function createSshSession(config: ServerConfig): SshSession {
             stdoutChunks.push(data);
           });
 
-          stream.stderr.on('data', (data: Buffer) => {
+          stream.stderr?.on('data', (data: Buffer) => {
             stderrChunks.push(data);
           });
 
-          stream.stderr.on('error', () => {
+          stream.stderr?.on('error', () => {
             // ignore stderr errors (e.g. when command has no stderr)
           });
 
